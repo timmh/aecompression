@@ -113,21 +113,6 @@ class IWildCamDataset(data.Dataset):
                 print(f"Failed to read image '{image_path}'. Replacing with zero tensor. Full exception: {e}")
                 return torch.zeros((3, self.height, self.width), dtype=self.dtype)
 
-
-# Loading the training dataset. We need to split it into a training and validation part
-train_dataset = IWildCamDataset(Path("/data/vision/beery/scratch/data/iwildcam_unzipped"), split="train")
-train_dataset.cache_on_device_(device)
-train_set, val_set = torch.utils.data.random_split(train_dataset, [0.9, 0.1], torch.Generator().manual_seed(42))
-
-# Loading the test set
-test_set = IWildCamDataset(Path("/data/vision/beery/scratch/data/iwildcam_unzipped"), split="test")
-test_set.cache_on_device_(device)
-
-# We define a set of data loaders that we can use for various purposes later.
-train_loader = data.DataLoader(train_set, batch_size=256, shuffle=True, drop_last=True, num_workers=0)
-val_loader = data.DataLoader(val_set, batch_size=256, shuffle=False, drop_last=False, num_workers=0)
-test_loader = data.DataLoader(test_set, batch_size=256, shuffle=False, drop_last=False, num_workers=0)
-
 def get_train_images(num):
     return torch.stack([train_dataset[i] for i in range(num)], dim=0)
 
@@ -270,6 +255,7 @@ class Autoencoder(pl.LightningModule):
 
 
 def compare_imgs(img1, img2, title_prefix="", i=0):
+    os.makedirs('figures', exist_ok=True)
     # Calculate MSE loss between both images
     loss = F.mse_loss(img1, img2, reduction="sum")
     # Plot images for visual comparison
@@ -281,24 +267,6 @@ def compare_imgs(img1, img2, title_prefix="", i=0):
     plt.axis('off')
     plt.savefig(f"figures/comparisons_{i}.png", bbox_inches="tight")
     plt.close()
-
-for i in range(2):
-    # Load example image
-    img = train_dataset[i].cpu().to(dtype=torch.float32)
-    img_mean = img.mean(dim=[1,2], keepdims=True)
-
-    # Shift image by one pixel
-    SHIFT = 1
-    img_shifted = torch.roll(img, shifts=SHIFT, dims=1)
-    img_shifted = torch.roll(img_shifted, shifts=SHIFT, dims=2)
-    img_shifted[:,:1,:] = img_mean
-    img_shifted[:,:,:1] = img_mean
-    compare_imgs(img, img_shifted, "Shifted -", i=i)
-
-    # Set half of the image to zero
-    img_masked = img.clone()
-    img_masked[:,:img_masked.shape[1]//2,:] = img_mean
-    compare_imgs(img, img_masked, "Masked -", i=i)
 
 
 class GenerateCallback(pl.Callback):
@@ -351,28 +319,6 @@ def train_iwildcam(latent_dim):
     return model, result
 
 
-model_dict = {}
-for latent_dim in [64, 128, 256, 384]:
-    model_ld, result_ld = train_iwildcam(latent_dim)
-    model_dict[latent_dim] = {"model": model_ld, "result": result_ld}
-
-
-latent_dims = sorted([k for k in model_dict])
-val_scores = [model_dict[k]["result"]["val"][0]["test_loss"] for k in latent_dims]
-
-fig = plt.figure(figsize=(6,4))
-plt.plot(latent_dims, val_scores, '--', color="#000", marker="*", markeredgecolor="#000", markerfacecolor="y", markersize=16)
-plt.xscale("log")
-plt.xticks(latent_dims, labels=latent_dims)
-plt.title("Reconstruction error over latent dimensionality", fontsize=14)
-plt.xlabel("Latent dimensionality")
-plt.ylabel("Reconstruction error")
-plt.minorticks_off()
-plt.ylim(0,100)
-plt.savefig("figures/reconstruction_err_vs_dim.png", bbox_inches="tight")
-plt.close()
-
-
 def visualize_reconstructions(model, input_imgs, latent_dim=None):
     # Reconstruct images
     model.eval()
@@ -391,51 +337,6 @@ def visualize_reconstructions(model, input_imgs, latent_dim=None):
     plt.close()
 
 
-
-input_imgs = get_train_images(4)
-for latent_dim in model_dict:
-    visualize_reconstructions(model_dict[latent_dim]["model"], input_imgs, latent_dim=latent_dim)
-
-
-rand_imgs = torch.rand(2, 3, HEIGHT, WIDTH) * 2 - 1
-visualize_reconstructions(model_dict[256]["model"], rand_imgs, latent_dim="rand")
-
-
-plain_imgs = torch.zeros(3, 3, HEIGHT, WIDTH)
-
-# Single color channel
-plain_imgs[1,0] = 1 
-# Checkboard pattern
-plain_imgs[2,:,:16,:16] = 1
-plain_imgs[2,:,16:,16:] = -1
-
-visualize_reconstructions(model_dict[256]["model"], plain_imgs, latent_dim="plain")
-
-
-model = model_dict[256]["model"]
-latent_vectors = torch.randn(8, model.hparams.latent_dim, device=model.device)
-with torch.no_grad():
-    imgs = model.decoder(latent_vectors)
-    imgs = imgs.cpu()
-
-grid = torchvision.utils.make_grid(imgs, nrow=4, normalize=True, value_range=(-1,1), pad_value=0.5)
-grid = grid.permute(1, 2, 0)
-plt.figure(figsize=(8,5))
-plt.imshow(grid)
-plt.axis('off')
-plt.savefig(f"figures/reconstructions_random_latent.png", bbox_inches="tight")
-plt.close()
-
-
-
-# We use the following model throughout this section. 
-# If you want to try a different latent dimensionality, change it here!
-model = model_dict[128]["model"] 
-
-
-
-
-
 def embed_imgs(model, data_loader, n=float("inf")):
     # Encode all images in the data_laoder using model, and return both images and encodings
     img_list, embed_list = [], []
@@ -448,10 +349,6 @@ def embed_imgs(model, data_loader, n=float("inf")):
         img_list.append(imgs)
         embed_list.append(z.detach().cpu())
     return (torch.cat(img_list, dim=0), torch.cat(embed_list, dim=0))
-
-n_embeddings = 100
-train_img_embeds = embed_imgs(model, train_loader, n=n_embeddings)
-test_img_embeds = embed_imgs(model, test_loader, n=n_embeddings)
 
 
 def find_similar_images(query_img, query_z, key_embeds, K=8, i=0):
@@ -470,29 +367,124 @@ def find_similar_images(query_img, query_z, key_embeds, K=8, i=0):
     plt.close()
 
 
+if __name__ == "__main__":
+    # Loading the training dataset. We need to split it into a training and validation part
+    train_dataset = IWildCamDataset(Path("/data/vision/beery/scratch/data/iwildcam_unzipped"), split="train")
+    train_dataset.cache_on_device_(device)
+    train_set, val_set = torch.utils.data.random_split(train_dataset, [0.9, 0.1], torch.Generator().manual_seed(42))
 
-# Plot the closest images for the first N test images as example
-for i in range(8):
-    find_similar_images(test_img_embeds[0][i], test_img_embeds[1][i], key_embeds=train_img_embeds, i=i)
+    # Loading the test set
+    test_set = IWildCamDataset(Path("/data/vision/beery/scratch/data/iwildcam_unzipped"), split="test")
+    test_set.cache_on_device_(device)
+
+    # We define a set of data loaders that we can use for various purposes later.
+    train_loader = data.DataLoader(train_set, batch_size=256, shuffle=True, drop_last=True, num_workers=0)
+    val_loader = data.DataLoader(val_set, batch_size=256, shuffle=False, drop_last=False, num_workers=0)
+    test_loader = data.DataLoader(test_set, batch_size=256, shuffle=False, drop_last=False, num_workers=0)
+
+    for i in range(2):
+        # Load example image
+        img = train_dataset[i].cpu().to(dtype=torch.float32)
+        img_mean = img.mean(dim=[1,2], keepdims=True)
+
+        # Shift image by one pixel
+        SHIFT = 1
+        img_shifted = torch.roll(img, shifts=SHIFT, dims=1)
+        img_shifted = torch.roll(img_shifted, shifts=SHIFT, dims=2)
+        img_shifted[:,:1,:] = img_mean
+        img_shifted[:,:,:1] = img_mean
+        compare_imgs(img, img_shifted, "Shifted -", i=i)
+
+        # Set half of the image to zero
+        img_masked = img.clone()
+        img_masked[:,:img_masked.shape[1]//2,:] = img_mean
+        compare_imgs(img, img_masked, "Masked -", i=i)
+
+    model_dict = {}
+    for latent_dim in [256]: #[64, 128, 256, 384]:
+        model_ld, result_ld = train_iwildcam(latent_dim)
+        model_dict[latent_dim] = {"model": model_ld, "result": result_ld}
+
+
+    latent_dims = sorted([k for k in model_dict])
+    val_scores = [model_dict[k]["result"]["val"][0]["test_loss"] for k in latent_dims]
+
+    fig = plt.figure(figsize=(6,4))
+    plt.plot(latent_dims, val_scores, '--', color="#000", marker="*", markeredgecolor="#000", markerfacecolor="y", markersize=16)
+    plt.xscale("log")
+    plt.xticks(latent_dims, labels=latent_dims)
+    plt.title("Reconstruction error over latent dimensionality", fontsize=14)
+    plt.xlabel("Latent dimensionality")
+    plt.ylabel("Reconstruction error")
+    plt.minorticks_off()
+    plt.ylim(0,100)
+    plt.savefig("figures/reconstruction_err_vs_dim.png", bbox_inches="tight")
+    plt.close()
+
+    input_imgs = get_train_images(4)
+    for latent_dim in model_dict:
+        visualize_reconstructions(model_dict[latent_dim]["model"], input_imgs, latent_dim=latent_dim)
+
+
+    rand_imgs = torch.rand(2, 3, HEIGHT, WIDTH) * 2 - 1
+    visualize_reconstructions(model_dict[256]["model"], rand_imgs, latent_dim="rand")
+
+
+    plain_imgs = torch.zeros(3, 3, HEIGHT, WIDTH)
+
+    # Single color channel
+    plain_imgs[1,0] = 1 
+    # Checkboard pattern
+    plain_imgs[2,:,:16,:16] = 1
+    plain_imgs[2,:,16:,16:] = -1
+
+    visualize_reconstructions(model_dict[256]["model"], plain_imgs, latent_dim="plain")
+
+
+    model = model_dict[256]["model"]
+    latent_vectors = torch.randn(8, model.hparams.latent_dim, device=model.device)
+    with torch.no_grad():
+        imgs = model.decoder(latent_vectors)
+        imgs = imgs.cpu()
+
+    grid = torchvision.utils.make_grid(imgs, nrow=4, normalize=True, value_range=(-1,1), pad_value=0.5)
+    grid = grid.permute(1, 2, 0)
+    plt.figure(figsize=(8,5))
+    plt.imshow(grid)
+    plt.axis('off')
+    plt.savefig(f"figures/reconstructions_random_latent.png", bbox_inches="tight")
+    plt.close()
+
+    # We use the following model throughout this section. 
+    # If you want to try a different latent dimensionality, change it here!
+    model = model_dict[128]["model"] 
+
+    n_embeddings = 100
+    train_img_embeds = embed_imgs(model, train_loader, n=n_embeddings)
+    test_img_embeds = embed_imgs(model, test_loader, n=n_embeddings)
+
+    # Plot the closest images for the first N test images as example
+    for i in range(8):
+        find_similar_images(test_img_embeds[0][i], test_img_embeds[1][i], key_embeds=train_img_embeds, i=i)
 
 
 
-# We use the following model throughout this section. 
-# If you want to try a different latent dimensionality, change it here!
-model = model_dict[128]["model"]
+    # We use the following model throughout this section. 
+    # If you want to try a different latent dimensionality, change it here!
+    model = model_dict[128]["model"]
 
 
-# Create a summary writer
-writer = SummaryWriter("tensorboard/")
+    # Create a summary writer
+    writer = SummaryWriter("tensorboard/")
 
 
-writer.add_embedding(test_img_embeds[1][:n_embeddings], # Encodings per image
-                     metadata=[test_set[i][1] for i in range(n_embeddings)], # Adding the labels per image to the plot
-                     label_img=(test_img_embeds[0][:n_embeddings]+1)/2.0) # Adding the original images to the plot
+    writer.add_embedding(test_img_embeds[1][:n_embeddings], # Encodings per image
+                        metadata=[test_set[i][1] for i in range(n_embeddings)], # Adding the labels per image to the plot
+                        label_img=(test_img_embeds[0][:n_embeddings]+1)/2.0) # Adding the original images to the plot
 
 
-# tensorboard --logdir tensorboard/
+    # tensorboard --logdir tensorboard/
 
 
-# Closing the summary writer
-writer.close()
+    # Closing the summary writer
+    writer.close()
