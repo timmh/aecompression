@@ -11,8 +11,8 @@ from PIL import Image
 ## Imports for plotting
 import matplotlib.pyplot as plt
 # %matplotlib inline 
-from IPython.display import set_matplotlib_formats
-set_matplotlib_formats('svg', 'pdf') # For export
+# from IPython.display import set_matplotlib_formats
+# set_matplotlib_formats('svg', 'pdf') # For export
 from matplotlib.colors import to_rgb
 import matplotlib
 matplotlib.rcParams['lines.linewidth'] = 2.0
@@ -56,6 +56,7 @@ CHECKPOINT_PATH = "checkpoints"
 HEIGHT = 96
 WIDTH = 160
 PRECISION = 32
+QUANTIZATION_PRECISION = 8
 
 class IWildCamDataset(data.Dataset):
     def __init__(self, data_dir, split, width=WIDTH, height=HEIGHT, precision=PRECISION):
@@ -123,7 +124,7 @@ class Encoder(nn.Module):
                  num_input_channels : int, 
                  base_channel_size : int, 
                  latent_dim : int, 
-                 act_fn : object = nn.GELU):
+                 act_fn : object = nn.ReLU):
         """
         Inputs: 
             - num_input_channels : Number of input channels of the image. For CIFAR, this parameter is 3
@@ -134,6 +135,7 @@ class Encoder(nn.Module):
         super().__init__()
         c_hid = base_channel_size
         self.net = nn.Sequential(
+            torch.quantization.QuantStub(),
             nn.Conv2d(num_input_channels, c_hid, kernel_size=3, padding=1, stride=2), # 32x32 => 16x16
             act_fn(),
             nn.Conv2d(c_hid, c_hid, kernel_size=3, padding=1),
@@ -158,7 +160,7 @@ class Decoder(nn.Module):
                  num_input_channels : int, 
                  base_channel_size : int, 
                  latent_dim : int, 
-                 act_fn : object = nn.GELU):
+                 act_fn : object = nn.ReLU):
         """
         Inputs: 
             - num_input_channels : Number of channels of the image to reconstruct. For CIFAR, this parameter is 3
@@ -182,6 +184,7 @@ class Decoder(nn.Module):
             nn.Conv2d(c_hid, c_hid, kernel_size=3, padding=1),
             act_fn(),
             nn.ConvTranspose2d(c_hid, num_input_channels, kernel_size=3, output_padding=1, padding=1, stride=2), # 16x16 => 32x32
+            torch.quantization.DeQuantStub(),
             nn.Tanh() # The input images is scaled between -1 and 1, hence the output has to be bounded as well
         )
     
@@ -296,7 +299,7 @@ def train_iwildcam(latent_dim):
                          accelerator="gpu" if str(device).startswith("cuda") else "cpu",
                          precision=PRECISION,
                          devices=1,
-                         max_epochs=100,
+                         max_epochs=1,
                          callbacks=[ModelCheckpoint(save_weights_only=True),
                                     GenerateCallback(get_train_images(8), every_n_epochs=1),
                                     LearningRateMonitor("epoch")])
@@ -305,12 +308,56 @@ def train_iwildcam(latent_dim):
     
     # Check whether pretrained model exists. If yes, load it and skip training
     pretrained_filename = os.path.join(CHECKPOINT_PATH, f"iwildcam_{latent_dim}.ckpt")
-    if os.path.isfile(pretrained_filename):
+    if False and os.path.isfile(pretrained_filename):
         print("Found pretrained model, loading...")
+        raise NotImplementedError("Not yet implemented for quantized models")
         model = Autoencoder.load_from_checkpoint(pretrained_filename)
     else:
         model = Autoencoder(base_channel_size=32, latent_dim=latent_dim).to(dtype=getattr(torch, f"float{PRECISION}"))
+        if QUANTIZATION_PRECISION != None:
+            qdtype = getattr(torch, f"qint{QUANTIZATION_PRECISION}", torch.qint8)  # if there is no native dtype for given integer bitwidth, use torch.qint8
+            model.qconfig = torch.ao.quantization.QConfig(
+                activation=torch.ao.quantization.fake_quantize.FusedMovingAvgObsFakeQuantize.with_args(
+                    observer=torch.ao.quantization.observer.MovingAverageMinMaxObserver,
+                    quant_min=0,
+                    quant_max=2 ** QUANTIZATION_PRECISION - 1,
+                    reduce_range=True,
+                ),
+                weight=torch.ao.quantization.fake_quantize.FakeQuantize.with_args(
+                    observer=torch.ao.quantization.observer.MovingAveragePerChannelMinMaxObserver,
+                    quant_min=-2 ** QUANTIZATION_PRECISION // 2,
+                    quant_max= 2 ** QUANTIZATION_PRECISION // 2 - 1,
+                    dtype=qdtype,
+                    qscheme=torch.per_channel_symmetric,
+                    reduce_range=False,
+                    ch_axis=0,
+                ),
+            )
+            conv_transpose_qconfig = torch.ao.quantization.QConfig(
+                activation=torch.ao.quantization.fake_quantize.FusedMovingAvgObsFakeQuantize.with_args(
+                    observer=torch.ao.quantization.observer.MovingAverageMinMaxObserver,
+                    quant_min=0,
+                    quant_max=2 ** QUANTIZATION_PRECISION - 1,
+                    reduce_range=True,
+                ),
+                weight=torch.ao.quantization.fake_quantize.FakeQuantize.with_args(
+                    observer=torch.ao.quantization.observer.MovingAverageMinMaxObserver,
+                    quant_min=-2 ** QUANTIZATION_PRECISION // 2,
+                    quant_max= 2 ** QUANTIZATION_PRECISION // 2 - 1,
+                    dtype=qdtype,
+                    qscheme=torch.per_tensor_affine,
+                    reduce_range=False,
+                ),
+            )
+            for m in model.modules():
+                if isinstance(m, torch.nn.modules.conv.ConvTranspose2d):
+                    m.qconfig = conv_transpose_qconfig
+
+            model = torch.quantization.prepare_qat(model, inplace=False)
+
         trainer.fit(model, train_loader, val_loader)
+
+        # model = torch.quantization.convert(model.eval(), inplace=False)  # re-enable to actually quantize model
         trainer.save_checkpoint(pretrained_filename)
     # Test best model on validation and test set
     val_result = trainer.test(model, val_loader, verbose=False)
@@ -401,7 +448,7 @@ if __name__ == "__main__":
         compare_imgs(img, img_masked, "Masked -", i=i)
 
     model_dict = {}
-    for latent_dim in [256]: #[64, 128, 256, 384]:
+    for latent_dim in [64, 128, 256, 384]:
         model_ld, result_ld = train_iwildcam(latent_dim)
         model_dict[latent_dim] = {"model": model_ld, "result": result_ld}
 
