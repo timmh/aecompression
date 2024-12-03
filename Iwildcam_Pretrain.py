@@ -21,7 +21,7 @@ sns.reset_orig()
 sns.set()
 
 ## Progress bar
-from tqdm.notebook import tqdm
+from tqdm import tqdm
 
 ## PyTorch
 import torch
@@ -36,7 +36,7 @@ from torchvision import transforms
 from torchvision.transforms import v2 as transforms_v2
 # PyTorch Lightning
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
+from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint, EarlyStopping
 
 # Tensorboard extension (for visualization purposes later)
 from torch.utils.tensorboard import SummaryWriter
@@ -114,8 +114,8 @@ class IWildCamDataset(data.Dataset):
                 print(f"Failed to read image '{image_path}'. Replacing with zero tensor. Full exception: {e}")
                 return torch.zeros((3, self.height, self.width), dtype=self.dtype)
 
-def get_train_images(num):
-    return torch.stack([train_dataset[i] for i in range(num)], dim=0)
+def get_train_images(num, random_seed=42):
+    return torch.stack([train_dataset[i] for i in np.random.default_rng(seed=random_seed).integers(0, len(train_dataset), num)], dim=0)
 
 
 class Encoder(nn.Module):
@@ -183,9 +183,11 @@ class Decoder(nn.Module):
             act_fn(),
             nn.Conv2d(c_hid, c_hid, kernel_size=3, padding=1),
             act_fn(),
-            nn.ConvTranspose2d(c_hid, num_input_channels, kernel_size=3, output_padding=1, padding=1, stride=2), # 16x16 => 32x32
+            nn.ConvTranspose2d(c_hid, c_hid, kernel_size=3, output_padding=1, padding=1, stride=2), # 16x16 => 32x32
+            act_fn(),
+            nn.Conv2d(c_hid, num_input_channels, kernel_size=3, padding=1), # 32x32 => 32x32
             torch.quantization.DeQuantStub(),
-            nn.Tanh() # The input images is scaled between -1 and 1, hence the output has to be bounded as well
+            # nn.Tanh() # The input images is scaled between -1 and 1, hence the output has to be bounded as well
         )
     
     def forward(self, x):
@@ -228,8 +230,7 @@ class Autoencoder(pl.LightningModule):
         """
         x = batch # We do not need the labels
         x_hat = self.forward(x)
-        loss = F.mse_loss(x, x_hat, reduction="none")
-        loss = loss.sum(dim=[1,2,3]).mean(dim=[0])
+        loss = F.mse_loss(x, x_hat, reduction="mean")  # TODO: use different loss function? see https://arxiv.org/pdf/1511.08861
         return loss
     
     def configure_optimizers(self):
@@ -293,16 +294,81 @@ class GenerateCallback(pl.Callback):
             trainer.logger.experiment.add_image("Reconstructions", grid, global_step=trainer.global_step)
 
 
+class QATCallback(pl.Callback):
+    
+    def __init__(self, delay_n_iters=0):
+        super().__init__()
+        self.delay_n_iters = delay_n_iters # start QAT after this many iterations
+        self._quantized = False
+
+    def on_train_batch_end(self, trainer, model, outputs, batch, batch_idx):
+        if batch_idx >= self.delay_n_iters and not self._quantized:
+            print("Activating QAT...")
+            self._quantized = True
+            if QUANTIZATION_PRECISION != None:
+                qdtype = getattr(torch, f"qint{QUANTIZATION_PRECISION}", torch.qint8)  # if there is no native dtype for given integer bitwidth, use torch.qint8
+                model.qconfig = torch.ao.quantization.QConfig(
+                    activation=torch.ao.quantization.fake_quantize.FusedMovingAvgObsFakeQuantize.with_args(
+                        observer=torch.ao.quantization.observer.MovingAverageMinMaxObserver,
+                        quant_min=0,
+                        quant_max=2 ** QUANTIZATION_PRECISION - 1,
+                        reduce_range=True,
+                    ),
+                    weight=torch.ao.quantization.fake_quantize.FakeQuantize.with_args(
+                        observer=torch.ao.quantization.observer.MovingAveragePerChannelMinMaxObserver,
+                        quant_min=-2 ** QUANTIZATION_PRECISION // 2,
+                        quant_max= 2 ** QUANTIZATION_PRECISION // 2 - 1,
+                        dtype=qdtype,
+                        qscheme=torch.per_channel_symmetric,
+                        reduce_range=False,
+                        ch_axis=0,
+                    ),
+                )
+                conv_transpose_qconfig = torch.ao.quantization.QConfig(
+                    activation=torch.ao.quantization.fake_quantize.FusedMovingAvgObsFakeQuantize.with_args(
+                        observer=torch.ao.quantization.observer.MovingAverageMinMaxObserver,
+                        quant_min=0,
+                        quant_max=2 ** QUANTIZATION_PRECISION - 1,
+                        reduce_range=True,
+                    ),
+                    weight=torch.ao.quantization.fake_quantize.FakeQuantize.with_args(
+                        observer=torch.ao.quantization.observer.MovingAverageMinMaxObserver,
+                        quant_min=-2 ** QUANTIZATION_PRECISION // 2,
+                        quant_max= 2 ** QUANTIZATION_PRECISION // 2 - 1,
+                        dtype=qdtype,
+                        qscheme=torch.per_tensor_affine,
+                        reduce_range=False,
+                    ),
+                )
+                for m in model.modules():
+                    if isinstance(m, torch.nn.modules.conv.ConvTranspose2d):
+                        m.qconfig = conv_transpose_qconfig
+
+                model = torch.ao.quantization.prepare_qat(model, inplace=True)
+
+
 def train_iwildcam(latent_dim):
     # Create a PyTorch Lightning trainer with the generation callback
     trainer = pl.Trainer(default_root_dir=os.path.join(CHECKPOINT_PATH, f"iwildcam_{latent_dim}"), 
                          accelerator="gpu" if str(device).startswith("cuda") else "cpu",
                          precision=PRECISION,
                          devices=1,
-                         max_epochs=1,
-                         callbacks=[ModelCheckpoint(save_weights_only=True),
-                                    GenerateCallback(get_train_images(8), every_n_epochs=1),
-                                    LearningRateMonitor("epoch")])
+                         max_epochs=100,
+                         callbacks=[
+                            QATCallback(delay_n_iters=500),
+                            ModelCheckpoint(save_weights_only=True),
+                            ModelCheckpoint(
+                                save_top_k=1,
+                                monitor="val_loss",
+                                mode="min",
+                                dirpath="best_checkpoints/",
+                                filename=f"{latent_dim}-" + "{epoch:02d}-{val_loss:.2f}",
+                            ),
+                            GenerateCallback(get_train_images(8), every_n_epochs=1),
+                            LearningRateMonitor("epoch"),
+                            EarlyStopping(monitor="val_loss", mode="min"),
+                        ]
+    )
     trainer.logger._log_graph = True         # If True, we plot the computation graph in tensorboard
     trainer.logger._default_hp_metric = None # Optional logging argument that we don't need
     
@@ -314,54 +380,14 @@ def train_iwildcam(latent_dim):
         model = Autoencoder.load_from_checkpoint(pretrained_filename)
     else:
         model = Autoencoder(base_channel_size=32, latent_dim=latent_dim).to(dtype=getattr(torch, f"float{PRECISION}"))
-        if QUANTIZATION_PRECISION != None:
-            qdtype = getattr(torch, f"qint{QUANTIZATION_PRECISION}", torch.qint8)  # if there is no native dtype for given integer bitwidth, use torch.qint8
-            model.qconfig = torch.ao.quantization.QConfig(
-                activation=torch.ao.quantization.fake_quantize.FusedMovingAvgObsFakeQuantize.with_args(
-                    observer=torch.ao.quantization.observer.MovingAverageMinMaxObserver,
-                    quant_min=0,
-                    quant_max=2 ** QUANTIZATION_PRECISION - 1,
-                    reduce_range=True,
-                ),
-                weight=torch.ao.quantization.fake_quantize.FakeQuantize.with_args(
-                    observer=torch.ao.quantization.observer.MovingAveragePerChannelMinMaxObserver,
-                    quant_min=-2 ** QUANTIZATION_PRECISION // 2,
-                    quant_max= 2 ** QUANTIZATION_PRECISION // 2 - 1,
-                    dtype=qdtype,
-                    qscheme=torch.per_channel_symmetric,
-                    reduce_range=False,
-                    ch_axis=0,
-                ),
-            )
-            conv_transpose_qconfig = torch.ao.quantization.QConfig(
-                activation=torch.ao.quantization.fake_quantize.FusedMovingAvgObsFakeQuantize.with_args(
-                    observer=torch.ao.quantization.observer.MovingAverageMinMaxObserver,
-                    quant_min=0,
-                    quant_max=2 ** QUANTIZATION_PRECISION - 1,
-                    reduce_range=True,
-                ),
-                weight=torch.ao.quantization.fake_quantize.FakeQuantize.with_args(
-                    observer=torch.ao.quantization.observer.MovingAverageMinMaxObserver,
-                    quant_min=-2 ** QUANTIZATION_PRECISION // 2,
-                    quant_max= 2 ** QUANTIZATION_PRECISION // 2 - 1,
-                    dtype=qdtype,
-                    qscheme=torch.per_tensor_affine,
-                    reduce_range=False,
-                ),
-            )
-            for m in model.modules():
-                if isinstance(m, torch.nn.modules.conv.ConvTranspose2d):
-                    m.qconfig = conv_transpose_qconfig
-
-            model = torch.quantization.prepare_qat(model, inplace=False)
 
         trainer.fit(model, train_loader, val_loader)
 
-        # model = torch.quantization.convert(model.eval(), inplace=False)  # re-enable to actually quantize model
+        # model = torch.quantization.convert(model.eval(), inplace=True)  # re-enable to actually quantize model
         trainer.save_checkpoint(pretrained_filename)
     # Test best model on validation and test set
-    val_result = trainer.test(model, val_loader, verbose=False)
-    test_result = trainer.test(model, test_loader, verbose=False)
+    val_result = trainer.test(model.cpu(), val_loader, verbose=True)
+    test_result = trainer.test(model.cpu(), test_loader, verbose=True)
     result = {"test": test_result, "val": val_result}
     return model, result
 
