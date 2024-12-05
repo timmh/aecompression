@@ -37,6 +37,8 @@ from torchvision.transforms import v2 as transforms_v2
 # PyTorch Lightning
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint, EarlyStopping
+import compressai
+from pytorch_msssim import ssim, ms_ssim
 
 # Tensorboard extension (for visualization purposes later)
 from torch.utils.tensorboard import SummaryWriter
@@ -55,8 +57,13 @@ print("Device:", device)
 CHECKPOINT_PATH = "checkpoints"
 HEIGHT = 96
 WIDTH = 160
+# HEIGHT = 96 * 2
+# WIDTH = 160 * 2
 PRECISION = 32
-QUANTIZATION_PRECISION = 8
+QUANTIZATION_PRECISION = None
+DO_CACHING = False
+# DATASET_ROOT = "/data/vision/beery/scratch/data/iwildcam_unzipped"
+DATASET_ROOT = "/tmp/iwildcam_unzipped"
 
 class IWildCamDataset(data.Dataset):
     def __init__(self, data_dir, split, width=WIDTH, height=HEIGHT, precision=PRECISION):
@@ -75,7 +82,7 @@ class IWildCamDataset(data.Dataset):
         self.transforms = transforms_v2.Compose([
             transforms_v2.Resize(size=(self.height, self.width), antialias=True),
             transforms_v2.ToDtype(self.dtype, scale=True),
-            transforms_v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            # transforms_v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),  # TODO: re-enable?
         ])
         self.cache_path = Path("/tmp/aecompression-cache") / "datasets" / f"{split}_{width}_{height}_{precision}.pt"
         self._cache = None
@@ -231,7 +238,11 @@ class Autoencoder(pl.LightningModule):
         x = batch # We do not need the labels
         x_hat = self.forward(x)
         loss = F.mse_loss(x, x_hat, reduction="mean")  # TODO: use different loss function? see https://arxiv.org/pdf/1511.08861
-        return loss
+        metrics = dict(
+            ssim=ssim(x, x_hat, data_range=1),
+            # ms_ssim=ms_ssim(x, x_hat, data_range=1),  # unsupported for 160 image size
+        )
+        return loss, metrics
     
     def configure_optimizers(self):
         optimizer = optim.Adam(self.parameters(), lr=1e-3)
@@ -245,17 +256,88 @@ class Autoencoder(pl.LightningModule):
         return {"optimizer": optimizer, "lr_scheduler": scheduler, "monitor": "val_loss"}
     
     def training_step(self, batch, batch_idx):
-        loss = self._get_reconstruction_loss(batch)                             
+        loss, metrics = self._get_reconstruction_loss(batch)                             
         self.log('train_loss', loss)
+        for k, v in metrics.items():
+            self.log(f'train_{k}', v)
         return loss
     
     def validation_step(self, batch, batch_idx):
-        loss = self._get_reconstruction_loss(batch)
+        loss, metrics = self._get_reconstruction_loss(batch)
         self.log('val_loss', loss)
+        for k, v in metrics.items():
+            self.log(f'val_{k}', v)
     
     def test_step(self, batch, batch_idx):
-        loss = self._get_reconstruction_loss(batch)
+        loss, metrics = self._get_reconstruction_loss(batch)
         self.log('test_loss', loss)
+        for k, v in metrics.items():
+            self.log(f'test_{k}', v)
+
+
+class CompressaiWrapper(pl.LightningModule):
+    
+    def __init__(self,
+                 model: nn.Module,
+                 width: int = WIDTH, 
+                 height: int = HEIGHT):
+        super().__init__()
+        # Saving hyperparameters of autoencoder
+        self.save_hyperparameters() 
+        # Creating encoder and decoder
+        self.model = model
+        # Example input array needed for visualizing the graph of the network
+        self.example_input_array = torch.zeros(2, 3, width, height)
+        
+    def forward(self, x):
+        """
+        The forward function takes in an image and returns the reconstructed image
+        """
+        out = self.model(x)
+        return out["x_hat"]
+    
+    def _get_reconstruction_loss(self, batch):
+        """
+        Given a batch of images, this function returns the reconstruction loss (MSE in our case)
+        """
+        x = batch # We do not need the labels
+        x_hat = self.forward(x)
+        loss = F.mse_loss(x, x_hat, reduction="mean")  # TODO: use different loss function? see https://arxiv.org/pdf/1511.08861
+        metrics = dict(
+            ssim=ssim(x, x_hat, data_range=1),
+            ms_ssim=ms_ssim(x, x_hat, data_range=1),
+        )
+        return loss, metrics
+    
+    def configure_optimizers(self):
+        optimizer = optim.Adam(self.parameters(), lr=1e-3)
+        # Using a scheduler is optional but can be helpful.
+        # The scheduler reduces the LR if the validation performance hasn't improved for the last N epochs
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 
+                                                         mode='min', 
+                                                         factor=0.2, 
+                                                         patience=20, 
+                                                         min_lr=5e-5)
+        return {"optimizer": optimizer, "lr_scheduler": scheduler, "monitor": "val_loss"}
+    
+    def training_step(self, batch, batch_idx):
+        loss, metrics = self._get_reconstruction_loss(batch)                             
+        self.log('train_loss', loss)
+        for k, v in metrics.items():
+            self.log(f'train_{k}', v)
+        return loss
+    
+    def validation_step(self, batch, batch_idx):
+        loss, metrics = self._get_reconstruction_loss(batch)
+        self.log('val_loss', loss)
+        for k, v in metrics.items():
+            self.log(f'val_{k}', v)
+    
+    def test_step(self, batch, batch_idx):
+        loss, metrics = self._get_reconstruction_loss(batch)
+        self.log('test_loss', loss)
+        for k, v in metrics.items():
+            self.log(f'test_{k}', v)
 
 
 def compare_imgs(img1, img2, title_prefix="", i=0):
@@ -355,7 +437,7 @@ def train_iwildcam(latent_dim):
                          devices=1,
                          max_epochs=100,
                          callbacks=[
-                            QATCallback(delay_n_iters=500),
+                            # QATCallback(delay_n_iters=500),
                             ModelCheckpoint(save_weights_only=True),
                             ModelCheckpoint(
                                 save_top_k=1,
@@ -379,7 +461,11 @@ def train_iwildcam(latent_dim):
         raise NotImplementedError("Not yet implemented for quantized models")
         model = Autoencoder.load_from_checkpoint(pretrained_filename)
     else:
-        model = Autoencoder(base_channel_size=32, latent_dim=latent_dim).to(dtype=getattr(torch, f"float{PRECISION}"))
+
+        if latent_dim == "bmshj2018_hyperprior":
+            model = CompressaiWrapper(compressai.zoo.bmshj2018_hyperprior(quality=1, metric="mse", pretrained=True))
+        else:
+            model = Autoencoder(base_channel_size=32, latent_dim=latent_dim).to(dtype=getattr(torch, f"float{PRECISION}"))
 
         trainer.fit(model, train_loader, val_loader)
 
@@ -442,18 +528,19 @@ def find_similar_images(query_img, query_z, key_embeds, K=8, i=0):
 
 if __name__ == "__main__":
     # Loading the training dataset. We need to split it into a training and validation part
-    train_dataset = IWildCamDataset(Path("/data/vision/beery/scratch/data/iwildcam_unzipped"), split="train")
-    train_dataset.cache_on_device_(device)
+    train_dataset = IWildCamDataset(Path(DATASET_ROOT), split="train")
+    if DO_CACHING: train_dataset.cache_on_device_(device)
     train_set, val_set = torch.utils.data.random_split(train_dataset, [0.9, 0.1], torch.Generator().manual_seed(42))
 
     # Loading the test set
-    test_set = IWildCamDataset(Path("/data/vision/beery/scratch/data/iwildcam_unzipped"), split="test")
-    test_set.cache_on_device_(device)
+    test_set = IWildCamDataset(Path(DATASET_ROOT), split="test")
+    if DO_CACHING: test_set.cache_on_device_(device)
 
     # We define a set of data loaders that we can use for various purposes later.
-    train_loader = data.DataLoader(train_set, batch_size=256, shuffle=True, drop_last=True, num_workers=0)
-    val_loader = data.DataLoader(val_set, batch_size=256, shuffle=False, drop_last=False, num_workers=0)
-    test_loader = data.DataLoader(test_set, batch_size=256, shuffle=False, drop_last=False, num_workers=0)
+    num_workers = 16 if not DO_CACHING else 0
+    train_loader = data.DataLoader(train_set, batch_size=256, shuffle=True, drop_last=True, num_workers=num_workers)
+    val_loader = data.DataLoader(val_set, batch_size=256, shuffle=False, drop_last=False, num_workers=num_workers)
+    test_loader = data.DataLoader(test_set, batch_size=256, shuffle=False, drop_last=False, num_workers=num_workers)
 
     for i in range(2):
         # Load example image
@@ -474,7 +561,8 @@ if __name__ == "__main__":
         compare_imgs(img, img_masked, "Masked -", i=i)
 
     model_dict = {}
-    for latent_dim in [64, 128, 256, 384]:
+    # for latent_dim in [64, 128, 256, 384]:
+    for latent_dim in ["bmshj2018_hyperprior"]:
         model_ld, result_ld = train_iwildcam(latent_dim)
         model_dict[latent_dim] = {"model": model_ld, "result": result_ld}
 
