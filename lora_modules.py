@@ -11,7 +11,7 @@ def fake_quantize(x: torch.Tensor, precision: int = None):
     if precision is None:
         return x
     else:
-        return x.clamp(-2 ** precision, 2 ** precision -1).round()
+        return x.clamp(-2 ** precision, 2 ** precision -1).round() / (2 ** precision)
 
 
 class LoRALinear(nn.Module):

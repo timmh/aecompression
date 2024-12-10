@@ -55,10 +55,10 @@ device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("
 print("Device:", device)
 
 CHECKPOINT_PATH = "checkpoints"
-HEIGHT = 96
-WIDTH = 160
-# HEIGHT = 96 * 2
-# WIDTH = 160 * 2
+# HEIGHT = 96
+# WIDTH = 160
+HEIGHT = 96 * 2
+WIDTH = 160 * 2
 PRECISION = 32
 QUANTIZATION_PRECISION = None
 DO_CACHING = False
@@ -257,20 +257,20 @@ class Autoencoder(pl.LightningModule):
     
     def training_step(self, batch, batch_idx):
         loss, metrics = self._get_reconstruction_loss(batch)                             
-        self.log('train_loss', loss)
+        self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
         for k, v in metrics.items():
             self.log(f'train_{k}', v)
         return loss
     
     def validation_step(self, batch, batch_idx):
         loss, metrics = self._get_reconstruction_loss(batch)
-        self.log('val_loss', loss)
+        self.log('val_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
         for k, v in metrics.items():
             self.log(f'val_{k}', v)
     
     def test_step(self, batch, batch_idx):
         loss, metrics = self._get_reconstruction_loss(batch)
-        self.log('test_loss', loss)
+        self.log('test_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
         for k, v in metrics.items():
             self.log(f'test_{k}', v)
 
@@ -322,20 +322,20 @@ class CompressaiWrapper(pl.LightningModule):
     
     def training_step(self, batch, batch_idx):
         loss, metrics = self._get_reconstruction_loss(batch)                             
-        self.log('train_loss', loss)
+        self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
         for k, v in metrics.items():
             self.log(f'train_{k}', v)
         return loss
     
     def validation_step(self, batch, batch_idx):
         loss, metrics = self._get_reconstruction_loss(batch)
-        self.log('val_loss', loss)
+        self.log('val_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
         for k, v in metrics.items():
             self.log(f'val_{k}', v)
     
     def test_step(self, batch, batch_idx):
         loss, metrics = self._get_reconstruction_loss(batch)
-        self.log('test_loss', loss)
+        self.log('test_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
         for k, v in metrics.items():
             self.log(f'test_{k}', v)
 
