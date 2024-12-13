@@ -40,6 +40,8 @@ from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint, Ea
 import compressai
 from pytorch_msssim import ssim, ms_ssim
 
+from utils import conv, deconv, ResidualBottleneckBlock
+
 # Tensorboard extension (for visualization purposes later)
 from torch.utils.tensorboard import SummaryWriter
 # %load_ext tensorboard
@@ -275,10 +277,53 @@ class Autoencoder(pl.LightningModule):
             self.log(f'test_{k}', v)
 
 
+class SimpleCompressaiModel(compressai.models.SimpleVAECompressionModel):
+    def __init__(self, latent_dim, N=192):
+        super(SimpleCompressaiModel, self).__init__()
+
+        self.latent_codec = compressai.latent_codecs.EntropyBottleneckLatentCodec(compressai.entropy_models.EntropyBottleneck(latent_dim))
+
+        self.g_a = nn.Sequential(
+            conv(3, N, kernel_size=5, stride=2),
+            ResidualBottleneckBlock(N, N),
+            ResidualBottleneckBlock(N, N),
+            ResidualBottleneckBlock(N, N),
+            conv(N, N, kernel_size=5, stride=2),
+            ResidualBottleneckBlock(N, N),
+            ResidualBottleneckBlock(N, N),
+            ResidualBottleneckBlock(N, N),
+            compressai.layers.AttentionBlock(N),
+            conv(N, N, kernel_size=5, stride=2),
+            ResidualBottleneckBlock(N, N),
+            ResidualBottleneckBlock(N, N),
+            ResidualBottleneckBlock(N, N),
+            conv(N, latent_dim, kernel_size=5, stride=2),
+            compressai.layers.AttentionBlock(latent_dim),
+        )
+
+        self.g_s = nn.Sequential(
+            compressai.layers.AttentionBlock(latent_dim),
+            deconv(latent_dim, N, kernel_size=5, stride=2),
+            ResidualBottleneckBlock(N, N),
+            ResidualBottleneckBlock(N, N),
+            ResidualBottleneckBlock(N, N),
+            deconv(N, N, kernel_size=5, stride=2),
+            compressai.layers.AttentionBlock(N),
+            ResidualBottleneckBlock(N, N),
+            ResidualBottleneckBlock(N, N),
+            ResidualBottleneckBlock(N, N),
+            deconv(N, N, kernel_size=5, stride=2),
+            ResidualBottleneckBlock(N, N),
+            ResidualBottleneckBlock(N, N),
+            ResidualBottleneckBlock(N, N),
+            deconv(N, 3, kernel_size=5, stride=2),
+        )
+
+
 class CompressaiWrapper(pl.LightningModule):
     
     def __init__(self,
-                 model: nn.Module,
+                 model: nn.Module = nn.Identity(),
                  width: int = WIDTH, 
                  height: int = HEIGHT):
         super().__init__()
@@ -309,14 +354,15 @@ class CompressaiWrapper(pl.LightningModule):
         )
         return loss, metrics
     
-    def configure_optimizers(self):
-        optimizer = optim.Adam(self.parameters(), lr=1e-3)
+    # def configure_optimizers(self, lr=1e-3, weight_decay=1e-5):
+    def configure_optimizers(self, lr=1e-5, weight_decay=1e-5):
+        optimizer = optim.Adam(self.parameters(), lr=lr, weight_decay=weight_decay)
         # Using a scheduler is optional but can be helpful.
         # The scheduler reduces the LR if the validation performance hasn't improved for the last N epochs
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 
                                                          mode='min', 
                                                          factor=0.2, 
-                                                         patience=20, 
+                                                         patience=20,
                                                          min_lr=5e-5)
         return {"optimizer": optimizer, "lr_scheduler": scheduler, "monitor": "val_loss"}
     
@@ -429,6 +475,16 @@ class QATCallback(pl.Callback):
                 model = torch.ao.quantization.prepare_qat(model, inplace=True)
 
 
+class ModelUpdateCallback(pl.Callback):
+    
+    def __init__(self):
+        super().__init__()
+
+    def on_validation_start(self, trainer, model):
+        if callable(model.model.update):
+            model.model.update()
+
+
 def train_iwildcam(latent_dim):
     # Create a PyTorch Lightning trainer with the generation callback
     trainer = pl.Trainer(default_root_dir=os.path.join(CHECKPOINT_PATH, f"iwildcam_{latent_dim}"), 
@@ -436,7 +492,10 @@ def train_iwildcam(latent_dim):
                          precision=PRECISION,
                          devices=1,
                          max_epochs=100,
+                         gradient_clip_val=0.5,
+                         detect_anomaly=True,
                          callbacks=[
+                            ModelUpdateCallback(),
                             # QATCallback(delay_n_iters=500),
                             ModelCheckpoint(save_weights_only=True),
                             ModelCheckpoint(
@@ -465,7 +524,8 @@ def train_iwildcam(latent_dim):
         if latent_dim == "bmshj2018_hyperprior":
             model = CompressaiWrapper(compressai.zoo.bmshj2018_hyperprior(quality=1, metric="mse", pretrained=True))
         else:
-            model = Autoencoder(base_channel_size=32, latent_dim=latent_dim).to(dtype=getattr(torch, f"float{PRECISION}"))
+            model = CompressaiWrapper(SimpleCompressaiModel(latent_dim))
+            # model = Autoencoder(base_channel_size=32, latent_dim=latent_dim).to(dtype=getattr(torch, f"float{PRECISION}"))
 
         trainer.fit(model, train_loader, val_loader)
 
@@ -538,9 +598,10 @@ if __name__ == "__main__":
 
     # We define a set of data loaders that we can use for various purposes later.
     num_workers = 16 if not DO_CACHING else 0
-    train_loader = data.DataLoader(train_set, batch_size=256, shuffle=True, drop_last=True, num_workers=num_workers)
-    val_loader = data.DataLoader(val_set, batch_size=256, shuffle=False, drop_last=False, num_workers=num_workers)
-    test_loader = data.DataLoader(test_set, batch_size=256, shuffle=False, drop_last=False, num_workers=num_workers)
+    batch_size = 128
+    train_loader = data.DataLoader(train_set, batch_size=batch_size, shuffle=True, drop_last=True, num_workers=num_workers)
+    val_loader = data.DataLoader(val_set, batch_size=batch_size, shuffle=False, drop_last=False, num_workers=num_workers)
+    test_loader = data.DataLoader(test_set, batch_size=batch_size, shuffle=False, drop_last=False, num_workers=num_workers)
 
     for i in range(2):
         # Load example image
@@ -561,10 +622,11 @@ if __name__ == "__main__":
         compare_imgs(img, img_masked, "Masked -", i=i)
 
     model_dict = {}
-    # for latent_dim in [64, 128, 256, 384]:
-    for latent_dim in ["bmshj2018_hyperprior"]:
+    # for latent_dim in [8, 16, 32, 64, 128, 256, 512]:
+    for latent_dim in [256]:
+    # for latent_dim in ["bmshj2018_hyperprior"]:
         model_ld, result_ld = train_iwildcam(latent_dim)
-        model_dict[latent_dim] = {"model": model_ld, "result": result_ld}
+        # model_dict[latent_dim] = {"model": model_ld, "result": result_ld}
 
 
     latent_dims = sorted([k for k in model_dict])
