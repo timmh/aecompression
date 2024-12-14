@@ -294,7 +294,7 @@ class CompressaiWrapper(pl.LightningModule):
         The forward function takes in an image and returns the reconstructed image
         """
         out = self.model(x)
-        return out["x_hat"]
+        return torch.sigmoid(out["x_hat"])
     
     def _get_reconstruction_loss(self, batch):
         """
@@ -310,7 +310,8 @@ class CompressaiWrapper(pl.LightningModule):
         return loss, metrics
     
     def configure_optimizers(self):
-        optimizer = optim.Adam(self.parameters(), lr=1e-3)
+        # optimizer = optim.Adam(self.parameters(), lr=1e-3)
+        optimizer = optim.SGD(self.parameters(), lr=1e-2, momentum=0.9)
         # Using a scheduler is optional but can be helpful.
         # The scheduler reduces the LR if the validation performance hasn't improved for the last N epochs
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 
@@ -462,12 +463,12 @@ def train_iwildcam(latent_dim):
         model = Autoencoder.load_from_checkpoint(pretrained_filename)
     else:
 
-        if latent_dim == "bmshj2018_hyperprior":
-            model = CompressaiWrapper(compressai.zoo.bmshj2018_hyperprior(quality=1, metric="mse", pretrained=True))
-        else:
-            model = Autoencoder(base_channel_size=32, latent_dim=latent_dim).to(dtype=getattr(torch, f"float{PRECISION}"))
+        # if latent_dim == "bmshj2018_hyperprior":
+        model = CompressaiWrapper(compressai.models.ScaleHyperprior(N=192, M=latent_dim))
+        # else:
+        #     model = Autoencoder(base_channel_size=32, latent_dim=latent_dim).to(dtype=getattr(torch, f"float{PRECISION}"))
 
-        trainer.fit(model, train_loader, val_loader)
+        trainer.fit(model, train_loader, val_loader, ckpt_path="best_checkpoints/8-epoch=04-val_loss=0.01.ckpt")
 
         # model = torch.quantization.convert(model.eval(), inplace=True)  # re-enable to actually quantize model
         trainer.save_checkpoint(pretrained_filename)
@@ -562,7 +563,8 @@ if __name__ == "__main__":
 
     model_dict = {}
     # for latent_dim in [64, 128, 256, 384]:
-    for latent_dim in ["bmshj2018_hyperprior"]:
+    # for latent_dim in ["bmshj2018_hyperprior"]:
+    for latent_dim in [8]:
         model_ld, result_ld = train_iwildcam(latent_dim)
         model_dict[latent_dim] = {"model": model_ld, "result": result_ld}
 
