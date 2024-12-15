@@ -1,6 +1,7 @@
 # adapted from: https://lightning.ai/docs/pytorch/stable/notebooks/course_UvA-DL/08-deep-autoencoders.html
 
 ## Standard libraries
+import argparse
 import os
 import json
 import math
@@ -529,6 +530,12 @@ def find_similar_images(query_img, query_z, key_embeds, K=8, i=0):
 
 
 if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--dataset_root', default=DATASET_ROOT)
+    args = parser.parse_args()
+    DATASET_ROOT = args.dataset_root
+
     # Loading the training dataset. We need to split it into a training and validation part
     train_dataset = IWildCamDataset(Path(DATASET_ROOT), split="train")
     if DO_CACHING: train_dataset.cache_on_device_(device)
