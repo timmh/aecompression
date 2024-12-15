@@ -29,7 +29,7 @@ particularly at locations with abundant imagery.
 python Iwildcam_Pretrain.py --dataset_root /your/path/to/iwildcam_unzipped/
 ```
 
-Alternatively, you can download our pre-trained weights here: https://github.com/timmh/aecompression/releases/download/submission/8-epoch.04-val_loss.0.01.ckpt
+Alternatively, you can download our pre-trained weights here: [https://github.com/timmh/aecompression/releases/download/submission/8-epoch.04-val_loss.0.01.ckpt](https://github.com/timmh/aecompression/releases/download/submission-tag/8-epoch.04-val_loss.0.01.ckpt)
 
 
 3. Fine-tune on test locations using LoRA and QAT:
