@@ -40,7 +40,7 @@ python lora_continual.py --dataset_root /your/path/to/iwildcam_unzipped/ --weigh
 
 ### Interactive demo
 
-Turn your webcam into a camera trap! Our demo, `demo.ipynb` will capture a sequence of images from your webcam (much like a camera trap does). Take this moment to live out your fantasies of being a wild animal, roaming free in the wildnerness of your choosing, unaware of the human technology surveiling you. Take this guy as an example, caught as he emerges from behind a domesticated croton:
+Turn your webcam into a camera trap! Our demo, `demo.ipynb` will capture a sequence of images from your webcam (much like a camera trap does). Take this moment to live out your fantasies of being a wild animal, roaming free in the wilderness, unaware of the human camera trap technology surveiling you. Take this guy as an example, caught as he emerges from behind a domesticated croton:
 
 <img width="1206" alt="Screenshot 2024-12-14 at 7 22 49 PM" src="https://github.com/user-attachments/assets/e92ca293-d84f-4817-9e7a-e1ff9ab783da" />
 
