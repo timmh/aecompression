@@ -14,7 +14,7 @@ particularly at locations with abundant imagery.
 ### Reproducing our experiments
 
 1. `pip install requirements.txt`
-2.  Download the iWildcam dataset here: [https://github.com/visipedia/iwildcam_comp](https://github.com/visipedia/iwildcam_comp). After unzipping, your directory structure should like as follows:
+2.  Download the iWildcam dataset here: [https://github.com/visipedia/iwildcam_comp](https://github.com/visipedia/iwildcam_comp). After unzipping, your directory structure should look as follows:
 
 ```
 /your/path/to/iwildcam_unzipped/
@@ -35,8 +35,19 @@ Alternatively, you can download our pre-trained weights here: https://github.com
 3. Fine-tune on test locations using LoRA and QAT:
 
 ```
-python lora_continual.py --dataset_root /your/path/to/iwildcam_unzipped/
+python lora_continual.py --dataset_root /your/path/to/iwildcam_unzipped/ --weights /path/to/your/pretrained_weights.ckpt
 ```
 
 ### Interactive demo
 
+Turn your webcam into a camera trap! Our demo, `demo.ipynb` will capture a sequence of images from your webcam (much like a camera trap does). Take this moment to live out your fantasies of being a wild animal, roaming free in the wildnerness of your choosing, unaware of the human technology surveiling you. Take this guy as an example, caught as he emerges from behind a domesticated croton:
+
+<img width="1206" alt="Screenshot 2024-12-14 at 7 22 49 PM" src="https://github.com/user-attachments/assets/e92ca293-d84f-4817-9e7a-e1ff9ab783da" />
+
+
+Execute the notebook cells to run LoRA fine-tuning in real time, and observe the reconstruction getting better over time. 
+
+<img width="1217" alt="Screenshot 2024-12-14 at 7 24 54 PM" src="https://github.com/user-attachments/assets/cedba39a-2709-424f-b7c3-9f8ae0d3280d" />
+
+
+In a real-world deployment, we would submit the latent encoding of these images alongside the LoRA decoder weights, enabling low-bandwidth image transmission via satellite.
