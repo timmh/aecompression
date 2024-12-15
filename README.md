@@ -13,18 +13,26 @@ particularly at locations with abundant imagery.
 
 ### Reproducing our experiments
 
-1. Download the iWildcam dataset here: https://github.com/visipedia/iwildcam_comp
-
-2. Pre-train an autoencoder on the iWildcam training set:
+1. `pip install requirements.txt`
+2.  Download the iWildcam dataset here: [https://github.com/visipedia/iwildcam_comp](https://github.com/visipedia/iwildcam_comp). After unzipping, your directory structure should like as follows:
 
 ```
-python Iwildcam_Pretrain.py
+/your/path/to/iwildcam_unzipped/
+  train/
+  test/
+  metadata/
+```
+
+3. Pre-train an autoencoder on the iWildcam training set:
+
+```
+python Iwildcam_Pretrain.py --dataset_root /your/path/to/iwildcam_unzipped/
 ```
 
 3. Fine-tune on test locations using LoRA and QAT:
 
 ```
-python lora_continual.py
+python lora_continual.py --dataset_root /your/path/to/iwildcam_unzipped/
 ```
 
 ### Interactive demo
