@@ -13,7 +13,7 @@ particularly at locations with abundant imagery.
 
 ### Reproducing our experiments
 
-1. `pip install requirements.txt`
+1. `pip install -r requirements.txt`
 2.  Download the iWildcam dataset here: [https://github.com/visipedia/iwildcam_comp](https://github.com/visipedia/iwildcam_comp). After unzipping, your directory structure should look as follows:
 
 ```
